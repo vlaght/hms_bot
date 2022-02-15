@@ -1,23 +1,25 @@
-import os
+import hashlib
+import logging
 import math
+import os
 import subprocess
 from functools import wraps
-import logging
 
+import qbittorrent
+import requests
 from telegram import Update
-from telegram.ext import Updater
 from telegram.ext import CallbackContext
 from telegram.ext import CommandHandler
-from telegram.ext import MessageHandler
 from telegram.ext import Filters
-import qbittorrent
+from telegram.ext import MessageHandler
+from telegram.ext import  Updater
 
-from cfg import TOKEN
-from cfg import SAVE_PATH
 from cfg import ALLOWED_USERNAMES
-from cfg import QBIT_URL
 from cfg import JSTEG_EXE_PATH
+from cfg import QBIT_URL
+from cfg import SAVE_PATH
 from cfg import TMP_DIR
+from cfg import TOKEN
 
 
 logger = logging.getLogger(__name__)
@@ -44,17 +46,35 @@ def restricted_zone(f):
     return wrapper
 
 
+def with_logging_exceptions(f):
+    @wraps(f)
+    def wrapper(update: Update, context: CallbackContext):
+        try:
+            return f(update, context)
+        except Exception as exc:
+            logger.exception('woopsie!')
+            context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="Что-то пошло не так: {}".format(exc.args[0]),
+            )
+    return wrapper
+
+
+@with_logging_exceptions
 def start(update: Update, context: CallbackContext):
     context.bot.send_message(
         chat_id=update.effective_chat.id,
         text=(
             "Halo, hooman!🦈 \n"
             "Можешь слать мне торрент-файлы прям так, поставлю на закачку\n"
-            "Или через /magnet <ссылка>\nПосмотреть активные - /stat\n"
+            "Или через /magnet <ссылка>\n"
+            "Или через /link <ссылка-на-торрент-файл>\n"
+            "Посмотреть активные - /stat\n"
         ),
     )
 
 
+@with_logging_exceptions
 @restricted_zone
 def add_torrent_by_magnet(update: Update, context: CallbackContext):
     magnet_url = update.effective_message.text.replace('/magnet ', '')
@@ -65,6 +85,7 @@ def add_torrent_by_magnet(update: Update, context: CallbackContext):
     )
 
 
+@with_logging_exceptions
 @restricted_zone
 def stat(update: Update, context: CallbackContext):
     torrents = qbit_client.torrents(filter='downloading')
@@ -90,6 +111,7 @@ def stat(update: Update, context: CallbackContext):
     )
 
 
+@with_logging_exceptions
 @restricted_zone
 def add_torrent_by_file(update: Update, context: CallbackContext):
     file_ = context.bot.get_file(update.message.document)    
@@ -108,6 +130,30 @@ def add_torrent_by_file(update: Update, context: CallbackContext):
     )
 
 
+@with_logging_exceptions
+@restricted_zone
+def add_torrent_by_file_link(update: Update, context: CallbackContext):
+    file_url = update.effective_message.text.replace('/link ', '')
+    response = requests.get(file_url, stream=True)
+    if response.status_code != 200:
+        raise Exception('Вернулся код {}'.format(response.status_code))
+    hasher = hashlib.sha256()
+    hasher.update(file_url.encode())
+    out_path = os.path.join(
+        SAVE_PATH,
+        '{}.torrent'.format(hasher.hexdigest()),
+    )
+    with open(out_path, 'wb') as f:
+        for chunk in response:
+            f.write(chunk)
+
+    context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="✅ Закачка скоро начнется"
+    )
+
+
+@with_logging_exceptions
 @restricted_zone
 def check_photo(update: Update, context: CallbackContext):
     file_ = context.bot.get_file(update.message.document)    
@@ -129,6 +175,7 @@ def check_photo(update: Update, context: CallbackContext):
 
 start_handler = CommandHandler('start', start)
 magnet_handler = CommandHandler('magnet', add_torrent_by_magnet)
+file_link_handler = CommandHandler('link', add_torrent_by_file_link)
 stat_handler = CommandHandler('stat', stat)
 download_handler = MessageHandler(
     Filters.document.file_extension('torrent'),
@@ -144,10 +191,12 @@ handlers = [
     stat_handler,
     magnet_handler,
     download_handler,
+    file_link_handler,
     photo_check_handler,
     
 ]
 for h in handlers:
     dispatcher.add_handler(h)
 
+logger.info('Start polling...')
 updater.start_polling()
