@@ -3,11 +3,13 @@ import logging
 import math
 import os
 import subprocess
-from functools import wraps
+from functools import reduce, wraps
+from urllib.parse import urlparse
 
 import qbittorrent
 import requests
 from telegram import Update
+from telegram import File
 from telegram.ext import CallbackContext
 from telegram.ext import CommandHandler
 from telegram.ext import Filters
@@ -20,6 +22,11 @@ from cfg import QBIT_URL
 from cfg import SAVE_PATH
 from cfg import TMP_DIR
 from cfg import TOKEN
+from cfg import SEAFILE_URL
+from cfg import SEAFILE_LOGIN
+from cfg import SEAFILE_PASSWORD
+from cfg import SEAFILE_REPO
+from cfg import SEAFILE_STORABLE_EXTENSIONS
 
 
 logger = logging.getLogger(__name__)
@@ -52,11 +59,12 @@ def with_logging_exceptions(f):
         try:
             return f(update, context)
         except Exception as exc:
-            logger.exception('woopsie!')
+            logger.error('woopsie!')
             context.bot.send_message(
                 chat_id=update.effective_chat.id,
-                text="Что-то пошло не так: {}".format(exc.args[0]),
+                text="❌ Что-то пошло не так: {}".format(exc.args[0]),
             )
+            raise exc
     return wrapper
 
 
@@ -70,6 +78,9 @@ def start(update: Update, context: CallbackContext):
             "Или через /magnet <ссылка>\n"
             "Или через /link <ссылка-на-торрент-файл>\n"
             "Посмотреть активные - /stat\n"
+            "Документы следующих разрешений сохраню в SeaFile"
+            " (имя можно переопределить в подписи): "
+            f"{', '.join(SEAFILE_STORABLE_EXTENSIONS)}"
         ),
     )
 
@@ -114,7 +125,7 @@ def stat(update: Update, context: CallbackContext):
 @with_logging_exceptions
 @restricted_zone
 def add_torrent_by_file(update: Update, context: CallbackContext):
-    file_ = context.bot.get_file(update.message.document)    
+    file_ = context.bot.get_file(update.message.document)
     file_name = os.path.basename(file_.file_path)
     if file_name in os.listdir(SAVE_PATH):
         context.bot.send_message(
@@ -153,16 +164,94 @@ def add_torrent_by_file_link(update: Update, context: CallbackContext):
     )
 
 
+def get_auth_token_from_seafile():
+    api_auth_path = f'{SEAFILE_URL}/api2/auth-token/'
+    response = requests.post(
+        api_auth_path,
+        data={'username': SEAFILE_LOGIN, 'password': SEAFILE_PASSWORD},
+    )
+    token = response.json()['token']
+    return token
+
+
+def save_file(file_: File, file_name: str, randomize: bool = False) -> str:
+    if not os.path.exists(TMP_DIR):
+        os.mkdir(TMP_DIR)
+    if randomize:
+        hasher = hashlib.sha256()
+        hasher.update(file_name.encode())
+        filename_for_saving = hasher.hexdigest()
+    else:
+        filename_for_saving = file_name
+    temp_file_path = os.path.join(TMP_DIR, filename_for_saving)
+    with open(temp_file_path, 'wb') as outfile:
+        file_.download(out=outfile)
+    return temp_file_path
+
+
+@with_logging_exceptions
+@restricted_zone
+def upload_doc_to_seafile(update: Update, context: CallbackContext):
+    MEGABYTE = 1024 * 1024
+    LIMIT = 20
+    file_ = context.bot.get_file(update.message.document)
+    ext = file_.file_path.rsplit('.', 1)[-1]
+    file_name = f'{update.effective_message.caption}.{ext}' or \
+        update.effective_message.effective_attachment.file_name
+
+    if file_.file_size > MEGABYTE * LIMIT:
+        context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"❌ Файл слишком большой, лимит в {LIMIT}МБ"
+        )
+        return
+
+    temp_file_path = save_file(file_, file_name)
+
+    token = get_auth_token_from_seafile()
+    get_upload_link_path = (
+        f'{SEAFILE_URL}/api2/repos/{SEAFILE_REPO}/upload-link/'
+    )
+    upload_link = requests.get(
+        get_upload_link_path,
+        headers={'Authorization': f'Token {token}'},
+    ).json()
+
+    parsed_url = urlparse(upload_link)
+    upload_link = f'{SEAFILE_URL}{parsed_url.path}'
+
+    with open(temp_file_path, 'rb') as temp_file:
+        r = requests.post(
+            upload_link,
+            files={'file': temp_file},
+            data={
+                'parent_dir': '/',
+                'replace': 0,
+            },
+            headers={
+                'Authorization': f'Token {token}',
+            },
+        )
+
+    if r.status_code == 200:
+        response_text = "✅ Файл сохранен"
+    else:
+        response_text = f"❌ HTTP {r.status_code}: {r.text[:100]}..."
+
+    context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=response_text,
+    )
+
+
 @with_logging_exceptions
 @restricted_zone
 def check_photo(update: Update, context: CallbackContext):
-    file_ = context.bot.get_file(update.message.document)    
+    file_ = context.bot.get_file(update.message.document)
     file_name = os.path.basename(file_.file_path)
     if not os.path.exists(TMP_DIR):
         os.mkdir(TMP_DIR)
-    photo_path = os.path.join(TMP_DIR, file_name)
-    with open(photo_path, 'wb') as outfile:
-        file_.download(out=outfile)
+    photo_path = save_file(file_, file_name)
     cmd = [JSTEG_EXE_PATH, 'reveal', photo_path]
     with subprocess.Popen(cmd, stdout=subprocess.PIPE) as proc:
         res = proc.stdout.read().decode()
@@ -172,18 +261,27 @@ def check_photo(update: Update, context: CallbackContext):
         text=res or 'Ничего не обнаружено',
     )
 
+ext_filter = Filters.document.file_extension
 
 start_handler = CommandHandler('start', start)
 magnet_handler = CommandHandler('magnet', add_torrent_by_magnet)
 file_link_handler = CommandHandler('link', add_torrent_by_file_link)
 stat_handler = CommandHandler('stat', stat)
 download_handler = MessageHandler(
-    Filters.document.file_extension('torrent'),
+    ext_filter('torrent'),
     add_torrent_by_file,
 )
 photo_check_handler = MessageHandler(
     Filters.document.jpg,
     check_photo
+)
+seafile_handler = MessageHandler(
+    reduce(
+        lambda merged_filter, ext2: merged_filter | ext_filter(ext2),
+        SEAFILE_STORABLE_EXTENSIONS,
+        ext_filter(SEAFILE_STORABLE_EXTENSIONS[0]),
+    ),
+    upload_doc_to_seafile,
 )
 
 handlers = [
@@ -193,7 +291,7 @@ handlers = [
     download_handler,
     file_link_handler,
     photo_check_handler,
-    
+    seafile_handler,
 ]
 for h in handlers:
     dispatcher.add_handler(h)
