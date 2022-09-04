@@ -215,11 +215,16 @@ def upload_doc_to_seafile(update: Update, context: CallbackContext):
     get_upload_link_path = (
         f'{SEAFILE_URL}/api2/repos/{SEAFILE_REPO}/upload-link/'
     )
-    upload_link = requests.get(
+    uplink_req = requests.get(
         get_upload_link_path,
         headers={'Authorization': f'Token {token}'},
-    ).json()
-
+    )
+    if uplink_req.status_code != 200:
+        raise Exception(
+            f'Got HTTP {uplink_req.status_code}: {uplink_req.text}',
+        )
+    upload_link = uplink_req.json()
+    print(upload_link)
     parsed_url = urlparse(upload_link)
     upload_link = f'{SEAFILE_URL}{parsed_url.path}'
 
