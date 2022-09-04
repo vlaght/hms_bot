@@ -199,8 +199,10 @@ def upload_doc_to_seafile(update: Update, context: CallbackContext):
     LIMIT = 20
     file_ = context.bot.get_file(update.message.document)
     ext = file_.file_path.rsplit('.', 1)[-1]
-    file_name = f'{update.effective_message.caption}.{ext}' or \
-        update.effective_message.effective_attachment.file_name
+    if update.effective_message.caption:
+        file_name = f'{update.effective_message.caption}.{ext}'
+    else:
+        file_name = update.effective_message.effective_attachment.file_name
 
     if file_.file_size > MEGABYTE * LIMIT:
         context.bot.send_message(
