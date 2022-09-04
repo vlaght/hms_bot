@@ -198,4 +198,5 @@ handlers = [
 for h in handlers:
     dispatcher.add_handler(h)
 
+logger.info('Start polling...')
 updater.start_polling()
