@@ -224,9 +224,6 @@ def upload_doc_to_seafile(update: Update, context: CallbackContext):
             f'Got HTTP {uplink_req.status_code}: {uplink_req.text}',
         )
     upload_link = uplink_req.json()
-    print(upload_link)
-    parsed_url = urlparse(upload_link)
-    upload_link = f'{SEAFILE_URL}{parsed_url.path}'
 
     with open(temp_file_path, 'rb') as temp_file:
         r = requests.post(
