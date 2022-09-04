@@ -170,6 +170,9 @@ def get_auth_token_from_seafile():
         api_auth_path,
         data={'username': SEAFILE_LOGIN, 'password': SEAFILE_PASSWORD},
     )
+    if response.status_code != 200:
+        raise Exception(f'Got HTTP {response.status_code}: {response.text}')
+
     token = response.json()['token']
     return token
 
