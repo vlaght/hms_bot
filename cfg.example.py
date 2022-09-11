@@ -16,3 +16,6 @@ SEAFILE_STORABLE_EXTENSIONS = [
     'txt',
     'fb2',
 ]
+RUTRACKER_USER = '<username>'
+RUTRACKER_PASS = '<password>'
+SOCKS_PROXY = '<proxy_connection_string>'

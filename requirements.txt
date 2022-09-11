@@ -1,0 +1,5 @@
+python-qbittorrent==0.4.2
+python-telegram-bot==13.11
+requests
+requests-unixsocket
+rutracker-api==0.22.9

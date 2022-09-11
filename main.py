@@ -1,33 +1,39 @@
 import hashlib
 import logging
-import math
 import os
 import subprocess
+from datetime import datetime
 from functools import reduce, wraps
-from urllib.parse import urlparse
 
 import qbittorrent
 import requests
-from telegram import Update
-from telegram import File
-from telegram.ext import CallbackContext
-from telegram.ext import CommandHandler
-from telegram.ext import Filters
-from telegram.ext import MessageHandler
-from telegram.ext import  Updater
+from rutracker_api import RutrackerApi as RutrackerApiProvider
+from telegram import File, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    CallbackContext,
+    CallbackQueryHandler,
+    CommandHandler,
+    Filters,
+    MessageHandler,
+    Updater,
+)
 
-from cfg import ALLOWED_USERNAMES
-from cfg import JSTEG_EXE_PATH
-from cfg import QBIT_URL
-from cfg import SAVE_PATH
-from cfg import TMP_DIR
-from cfg import TOKEN
-from cfg import SEAFILE_URL
-from cfg import SEAFILE_LOGIN
-from cfg import SEAFILE_PASSWORD
-from cfg import SEAFILE_REPO
-from cfg import SEAFILE_STORABLE_EXTENSIONS
-
+from cfg import (
+    ALLOWED_USERNAMES,
+    JSTEG_EXE_PATH,
+    QBIT_URL,
+    RUTRACKER_PASS,
+    RUTRACKER_USER,
+    SAVE_PATH,
+    SEAFILE_LOGIN,
+    SEAFILE_PASSWORD,
+    SEAFILE_REPO,
+    SEAFILE_STORABLE_EXTENSIONS,
+    SEAFILE_URL,
+    SOCKS_PROXY,
+    TMP_DIR,
+    TOKEN,
+)
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -39,16 +45,21 @@ updater = Updater(token=TOKEN, use_context=True)
 dispatcher = updater.dispatcher
 qbit_client = qbittorrent.Client(QBIT_URL)
 
+Session = requests.Session()
+Session.proxies['all'] = SOCKS_PROXY
+RutrackerApi = RutrackerApiProvider(session=Session)
+RutrackerApi.login(RUTRACKER_USER, RUTRACKER_PASS)
+
 
 def restricted_zone(f):
     @wraps(f)
     def wrapper(update: Update, context: CallbackContext):
         if update.effective_user.username not in ALLOWED_USERNAMES:
-                context.bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text='А я тобi не слушаю ;P'
-                )
-                return
+            context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text='А я тобi не слушаю ;P'
+            )
+            return
         return f(update, context)
     return wrapper
 
@@ -62,7 +73,7 @@ def with_logging_exceptions(f):
             logger.error('woopsie!')
             context.bot.send_message(
                 chat_id=update.effective_chat.id,
-                text="❌ Что-то пошло не так: {}".format(exc.args[0]),
+                text=f'❌ Что-то пошло не так({exc}): {exc.args}',
             )
             raise exc
     return wrapper
@@ -78,6 +89,7 @@ def start(update: Update, context: CallbackContext):
             "Или через /magnet <ссылка>\n"
             "Или через /link <ссылка-на-торрент-файл>\n"
             "Посмотреть активные - /stat\n"
+            "Поискать на рутрекере - /search <запрос>\n"
             "Документы следующих разрешений сохраню в SeaFile"
             " (имя можно переопределить в подписи): "
             f"{', '.join(SEAFILE_STORABLE_EXTENSIONS)}"
@@ -108,12 +120,12 @@ def stat(update: Update, context: CallbackContext):
         return
     report = ''
     for t in torrents:
-        progress = round(t['progress']*100, 2)
+        progress = round(t['progress'] * 100, 2)
         report += (
             '⭕ {} - скачано {},  ~ ⏳ {} мин. \n'.format(
                 t['name'],
                 '{}%'.format(str(progress)),
-                t['eta']//60,
+                t['eta'] // 60,
             )
         )
     context.bot.send_message(
@@ -268,12 +280,84 @@ def check_photo(update: Update, context: CallbackContext):
         text=res or 'Ничего не обнаружено',
     )
 
+
+def chunks(iterable, n):
+    """Yield n number of sequential chunks from iterable."""
+    d, r = divmod(len(iterable), n)
+    for i in range(n):
+        si = (d + 1) * (i if i < r else r) + d * (0 if i < r else i - r)
+        yield iterable[si:si + (d + 1 if i < r else d)]
+
+
+@with_logging_exceptions
+@restricted_zone
+def CallbackHandler(update: Update, context: CallbackContext):
+    if 'get-torrent-by-topic' in update.callback_query.data:
+        topic_id = update.callback_query.data.replace(
+            'get-torrent-by-topic', '',
+        ).strip()
+        out_path = os.path.join(
+            SAVE_PATH,
+            f'rutracker-{topic_id}-{datetime.utcnow().timestamp()}.torrent',
+        )
+        with open(out_path, 'wb') as outfile:
+            outfile.write(
+                RutrackerApi.download(topic_id)
+            )
+        context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="✅ Закачка скоро начнется",
+        )
+
+
+@with_logging_exceptions
+@restricted_zone
+def find_on_torrents(update: Update, context: CallbackContext):
+    RESULTS_TO_SHOW = 10
+    BUTTONS_ON_ROW = 5
+    ROWS = int(RESULTS_TO_SHOW / BUTTONS_ON_ROW)
+    search_query = update.effective_message.text.replace('/search ', '')
+    search = RutrackerApi.search(search_query)
+    results = search['result'][:RESULTS_TO_SHOW]
+
+    if results:
+        message = (
+            f'🔎 Результатов на первой странице: {len(search["result"])},'
+            f' покажу максимум {RESULTS_TO_SHOW}:\n'
+        )
+        formatted_results = '\n'.join(
+            f'👉 {idx}. [{t.category}] {t.title}'
+            for idx, t in enumerate(results, 1)
+        )
+        message = message + formatted_results
+        buttons = [
+            InlineKeyboardButton(
+                text=f'⬇ {idx}',
+                callback_data=f'get-torrent-by-topic {r.topic_id}'
+            ) for idx, r in enumerate(results, 1)
+        ]
+        reply_markup = InlineKeyboardMarkup(
+            inline_keyboard=list(chunks(buttons, ROWS)),
+        )
+    else:
+        message = 'Ничего не найдено по запросу "{search_query}" 🤔'
+        reply_markup = None
+
+    context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=message,
+        reply_markup=reply_markup,
+    )
+
+
 ext_filter = Filters.document.file_extension
 
 start_handler = CommandHandler('start', start)
 magnet_handler = CommandHandler('magnet', add_torrent_by_magnet)
 file_link_handler = CommandHandler('link', add_torrent_by_file_link)
 stat_handler = CommandHandler('stat', stat)
+rutracker_topic_handler = CallbackQueryHandler(CallbackHandler)
+torrents_search_handler = CommandHandler('search', find_on_torrents)
 download_handler = MessageHandler(
     ext_filter('torrent'),
     add_torrent_by_file,
@@ -299,6 +383,8 @@ handlers = [
     file_link_handler,
     photo_check_handler,
     seafile_handler,
+    rutracker_topic_handler,
+    torrents_search_handler,
 ]
 for h in handlers:
     dispatcher.add_handler(h)
