@@ -5,19 +5,9 @@ import subprocess
 from datetime import datetime
 from functools import reduce, wraps
 
-import qbittorrent
 import requests
-from rutracker_api import RutrackerApi as RutrackerApiProvider
-from telegram import File, InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import (
-    CallbackContext,
-    CallbackQueryHandler,
-    CommandHandler,
-    Filters,
-    MessageHandler,
-    Updater,
-)
 
+import qbittorrent
 from cfg import (
     ALLOWED_USERNAMES,
     JSTEG_EXE_PATH,
@@ -33,6 +23,16 @@ from cfg import (
     SOCKS_PROXY,
     TMP_DIR,
     TOKEN,
+)
+from rutracker_api import RutrackerApi as RutrackerApiProvider
+from telegram import File, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    CallbackContext,
+    CallbackQueryHandler,
+    CommandHandler,
+    Filters,
+    MessageHandler,
+    Updater,
 )
 
 logger = logging.getLogger(__name__)
@@ -326,7 +326,7 @@ def find_on_torrents(update: Update, context: CallbackContext):
             f' покажу максимум {RESULTS_TO_SHOW}:\n'
         )
         formatted_results = '\n'.join(
-            f'👉 {idx}. [{t.category}] {t.title}'
+            f'👉 {idx}. [{t.category}] ({t.formatted_size()}) {t.title}'
             for idx, t in enumerate(results, 1)
         )
         message = message + formatted_results
