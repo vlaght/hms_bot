@@ -8,8 +8,9 @@ from functools import reduce, wraps
 import requests
 
 import qbittorrent
+import rutracker_api.exceptions
 from cfg import (
-    ALLOWED_USERNAMES,
+    ALLOWED_USER_IDS,
     JSTEG_EXE_PATH,
     QBIT_URL,
     RUTRACKER_PASS,
@@ -48,13 +49,16 @@ qbit_client = qbittorrent.Client(QBIT_URL)
 Session = requests.Session()
 Session.proxies['all'] = SOCKS_PROXY
 RutrackerApi = RutrackerApiProvider(session=Session)
-RutrackerApi.login(RUTRACKER_USER, RUTRACKER_PASS)
+try:
+    RutrackerApi.login(RUTRACKER_USER, RUTRACKER_PASS)
+except rutracker_api.exceptions.AuthorizationException:
+    logger.error('failed to login to rutracker. I wonder why...')
 
 
 def restricted_zone(f):
     @wraps(f)
     def wrapper(update: Update, context: CallbackContext):
-        if update.effective_user.username not in ALLOWED_USERNAMES:
+        if update.effective_user.id not in ALLOWED_USER_IDS:
             context.bot.send_message(
                 chat_id=update.effective_chat.id,
                 text='А я тобi не слушаю ;P'
@@ -350,6 +354,35 @@ def find_on_torrents(update: Update, context: CallbackContext):
     )
 
 
+@with_logging_exceptions
+@restricted_zone
+def get_ip(update: Update, context: CallbackContext):
+    ip = requests.get('https://api.ipify.org').content.decode('utf8')
+    context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=f'Current external IP: {ip}',
+    )
+
+
+@with_logging_exceptions
+@restricted_zone
+def exec_cmd(update: Update, context: CallbackContext):
+    cmd = update.effective_message.text.replace('/exec ', '', 1)
+    if not cmd:
+        context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text='Got empty command, not doing a shit!',
+        )
+        return
+
+    cmd = update.effective_message.tersplit('/exec ', 1)[-1]
+    code, output = subprocess.getstatusoutput(cmd)
+    context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=f'code: {code}\nOutput:\n{output}',
+    )
+
+
 ext_filter = Filters.document.file_extension
 
 start_handler = CommandHandler('start', start)
@@ -358,6 +391,9 @@ file_link_handler = CommandHandler('link', add_torrent_by_file_link)
 stat_handler = CommandHandler('stat', stat)
 rutracker_topic_handler = CallbackQueryHandler(CallbackHandler)
 torrents_search_handler = CommandHandler('search', find_on_torrents)
+get_ip_handler = CommandHandler('ip', get_ip)
+exec_handler = CommandHandler('exec', exec_cmd)
+
 download_handler = MessageHandler(
     ext_filter('torrent'),
     add_torrent_by_file,
@@ -385,6 +421,8 @@ handlers = [
     seafile_handler,
     rutracker_topic_handler,
     torrents_search_handler,
+    get_ip_handler,
+    exec_handler,
 ]
 for h in handlers:
     dispatcher.add_handler(h)
