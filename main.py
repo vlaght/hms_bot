@@ -375,7 +375,6 @@ def exec_cmd(update: Update, context: CallbackContext):
         )
         return
 
-    cmd = update.effective_message.tersplit('/exec ', 1)[-1]
     code, output = subprocess.getstatusoutput(cmd)
     context.bot.send_message(
         chat_id=update.effective_chat.id,
